@@ -48,6 +48,11 @@ def analyze():
     )
     result_text = chat.choices[0].message.content
 
+    @app.get("/")
+def health():
+    return "ok", 200
+
+
     return jsonify({"text": text, "result": result_text})
 
 if __name__ == "__main__":
