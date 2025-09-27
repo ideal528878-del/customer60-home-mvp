@@ -189,3 +189,58 @@ def analyze():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+# 追加で必要な import
+import re, json, httpx
+
+# 追加：キー診断用（マスクして返す）
+@app.get("/diag/env")
+def diag_env():
+    raw = os.getenv("OPENAI_API_KEY")
+    if raw is None:
+        return jsonify({"has_key": False, "reason": "ENV not set"}), 200
+
+    # 文字種チェック
+    s = raw
+    # 代表的な不可視文字を検出
+    trailing_ws = bool(re.search(r"[\s\u3000]+$", s))  # 半角/全角空白・改行が末尾に?
+    leading_ws  = bool(re.match(r"^[\s\u3000]+", s))
+    non_printables = [ord(c) for c in s if c < " " or c == "\x7f"]  # 制御文字
+
+    # マスク表示（頭6桁・末尾6桁のみ）
+    def mask(k):
+        if not k or len(k) < 14:
+            return "(too short)"
+        return f"{k[:6]}...{k[-6:]}"
+
+    info = {
+        "has_key": True,
+        "masked": mask(s),
+        "length": len(s),
+        "starts_with": s[:10],
+        "ends_with_codes": [ord(c) for c in s[-3:]],  # 末尾3文字のコードポイント
+        "leading_whitespace": leading_ws,
+        "trailing_whitespace": trailing_ws,
+        "non_printable_codepoints": non_printables,
+    }
+
+    return jsonify(info), 200
+
+# 追加：OpenAI への疎通テスト（401/403/200 の生本文を返す）
+@app.get("/diag/ping")
+def diag_ping():
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        # 軽いエンドポイントに HEAD か GET を投げる（/models）
+        r = httpx.get("https://api.openai.com/v1/models", headers=headers, timeout=15)
+        return Response(
+            json.dumps({
+                "status_code": r.status_code,
+                "ok": r.is_success,
+                "body_preview": r.text[:400]
+            }, ensure_ascii=False),
+            mimetype="application/json"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
