@@ -1,24 +1,18 @@
-# app.py
+# app.py（全体そのまま使える安全版）
+
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
-import tempfile, os
+import tempfile, os, traceback
 
 app = Flask(__name__)
 CORS(app)
 
-# OpenAI クライアント（Render の環境変数 OPENAI_API_KEY を使用）
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ---------------------------
-# 1) フロント（単一HTML）を返す
-# ---------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="ja">
-<head>
-  <meta charset="UTF-8">
-  <title>音声採点デモ</title>
-</head>
+<head><meta charset="UTF-8"><title>音声採点デモ</title></head>
 <body>
   <h2>録音して送信</h2>
   <button id="startBtn">録音開始</button>
@@ -34,7 +28,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <script>
     let mediaRecorder;
     let audioChunks = [];
-
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const sendBtn = document.getElementById("sendBtn");
@@ -45,21 +38,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       audioChunks = [];
-
       mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-      mediaRecorder.onstop = () => {
-        sendBtn.disabled = false;
-      };
-
+      mediaRecorder.onstop = () => { sendBtn.disabled = false; };
       mediaRecorder.start();
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
+      startBtn.disabled = true; stopBtn.disabled = false;
     };
 
     stopBtn.onclick = () => {
       mediaRecorder.stop();
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+      startBtn.disabled = false; stopBtn.disabled = true;
     };
 
     sendBtn.onclick = async () => {
@@ -67,19 +54,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const arrayBuffer = await blob.arrayBuffer();
       const audioBuffer = await new AudioContext().decodeAudioData(arrayBuffer);
 
-      // WAVに変換
       const wavBuffer = encodeWAV(audioBuffer);
       const wavBlob = new Blob([wavBuffer], { type: "audio/wav" });
-
       const formData = new FormData();
       formData.append("file", wavBlob, "recording.wav");
 
       try {
-        const response = await fetch("/analyze", {
-          method: "POST",
-          body: formData
-        });
-        const data = await response.json();
+        const res = await fetch("/analyze", { method: "POST", body: formData });
+        // 失敗時はエラーテキストを表示する（HTMLが返ってきた場合の可視化）
+        if (!res.ok) {
+          const raw = await res.text();
+          throw new Error(`HTTP ${res.status}: ${raw.substring(0,300)}`);
+        }
+        const data = await res.json();
         transcriptEl.textContent = data.text || "（文字起こしなし）";
         resultEl.textContent = data.result || JSON.stringify(data, null, 2);
       } catch (err) {
@@ -94,15 +81,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
             view = new DataView(buffer),
             channels = [],
             sampleRate = audioBuffer.sampleRate;
-
       let offset = 0;
+
       function writeString(s) {
-        for (let i = 0; i < s.length; i++) {
-          view.setUint8(offset + i, s.charCodeAt(i));
-        }
+        for (let i = 0; i < s.length; i++) { view.setUint8(offset + i, s.charCodeAt(i)); }
         offset += s.length;
       }
-
       function floatTo16BitPCM(view, offset, input) {
         for (let i = 0; i < input.length; i++, offset += 2) {
           let s = Math.max(-1, Math.min(1, input[i]));
@@ -110,26 +94,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
       }
 
-      writeString("RIFF");
-      view.setUint32(offset, 36 + audioBuffer.length * numOfChan * 2, true); offset += 4;
+      writeString("RIFF"); view.setUint32(offset, 36 + audioBuffer.length * numOfChan * 2, true); offset += 4;
       writeString("WAVE");
-      writeString("fmt ");
-      view.setUint32(offset, 16, true); offset += 4;
+      writeString("fmt "); view.setUint32(offset, 16, true); offset += 4;
       view.setUint16(offset, 1, true); offset += 2;
       view.setUint16(offset, numOfChan, true); offset += 2;
       view.setUint32(offset, sampleRate, true); offset += 4;
       view.setUint32(offset, sampleRate * numOfChan * 2, true); offset += 4;
       view.setUint16(offset, numOfChan * 2, true); offset += 2;
       view.setUint16(offset, 16, true); offset += 2;
-      writeString("data");
-      view.setUint32(offset, audioBuffer.length * numOfChan * 2, true); offset += 4;
+      writeString("data"); view.setUint32(offset, audioBuffer.length * numOfChan * 2, true); offset += 4;
 
       for (let i = 0; i < numOfChan; i++) channels.push(audioBuffer.getChannelData(i));
       let interleaved = new Float32Array(audioBuffer.length * numOfChan);
       for (let i = 0; i < audioBuffer.length; i++) {
-        for (let c = 0; c < numOfChan; c++) {
-          interleaved[i * numOfChan + c] = channels[c][i];
-        }
+        for (let c = 0; c < numOfChan; c++) interleaved[i * numOfChan + c] = channels[c][i];
       }
       floatTo16BitPCM(view, offset, interleaved);
       return buffer;
@@ -147,32 +126,29 @@ def index():
 def health():
     return "ok", 200
 
-# ---------------------------
-# 2) 音声解析API
-# ---------------------------
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    # フロントから届いた録音ファイル
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
+    tmp_path = None
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "no file"}), 400
 
-    f = request.files["file"]
+        f = request.files["file"]
+        # 一時ファイルへ保存
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            f.save(tmp.name)
+            tmp_path = tmp.name
 
-    # 一時ファイルに保存
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        f.save(tmp.name)
-        tmp_path = tmp.name
+        # 1) Whisper で文字起こし
+        with open(tmp_path, "rb") as media:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=media
+            )
+        text = getattr(transcript, "text", "") or ""
 
-    # 1) Whisperで文字起こし
-    with open(tmp_path, "rb") as media:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=media
-        )
-    text = getattr(transcript, "text", "") or ""
-
-    # 2) GPTで6項目採点
-    rubric = """
+        # 2) GPT で採点
+        rubric = """
 項目は以下の6つ:
 1: 提案の許可
 2: ニーズを聴く
@@ -187,18 +163,29 @@ def analyze():
  "improvements": ["改善点1","改善点2","改善点3"]
 }
 """
-    chat = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "あなたは厳格で公平な検定官です。"},
-            {"role": "user", "content": f"次の発話を採点してください。\n{rubric}\n---\n発話:\n{text}"}
-        ]
-    )
-    result_text = chat.choices[0].message.content
+        chat = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "あなたは厳格で公平な検定官です。"},
+                {"role": "user", "content": f"次の発話を採点してください。\n{rubric}\n---\n発話:\n{text}"}
+            ]
+        )
+        result_text = chat.choices[0].message.content
 
-    return jsonify({"text": text, "result": result_text})
+        return jsonify({"text": text, "result": result_text})
+
+    except Exception as e:
+        # 例外を JSON で返す（ブラウザが HTML を受けてしまう問題を防ぐ）
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
-    # ローカル起動用（Render は Procfile で起動）
     app.run(host="0.0.0.0", port=5000, debug=True)
-
