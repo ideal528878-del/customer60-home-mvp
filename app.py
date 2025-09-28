@@ -1,3 +1,7 @@
+import os
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
+
+
 # app.py（全体そのまま使える安全版）
 
 from flask import Flask, request, jsonify, Response
